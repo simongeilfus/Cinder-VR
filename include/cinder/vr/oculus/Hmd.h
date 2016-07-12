@@ -140,7 +140,11 @@ private:
 
 	::ovrTextureSwapChain				mTextureSwapChain = nullptr;
 	std::vector<ci::gl::FboRef>			mRenderTargets;
+	std::vector<GLuint>					mMultiSampleRenderTargets;
+	std::vector<GLuint>					mMultiSampleTextures;
+	GLuint								mMultiSampleDepthTexture;
 	int									mCurrentSwapChainIndex = -1;
+	
 
 	::ovrMirrorTexture					mMirrorTexture = nullptr;
 	ci::gl::FboRef						mMirrorFbo;

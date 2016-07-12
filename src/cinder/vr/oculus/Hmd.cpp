@@ -48,7 +48,7 @@
 namespace cinder { namespace vr { namespace oculus {
 
 Hmd::Hmd( ci::vr::oculus::Context *context )
-	: ci::vr::Hmd( context ), mContext( context )
+	: ci::vr::Hmd( context ), mContext( context ), mMultiSampleDepthTexture( 0 )
 {	
 /*
 	ovrGraphicsLuid luid; // Not used in OpenGL
@@ -114,7 +114,7 @@ void Hmd::initializeRenderTarget()
     desc.Width			= mRenderTargetSize.x;
     desc.Height			= mRenderTargetSize.y;
     desc.MipLevels		= getSessionOptions().getMipLevels();
-    desc.SampleCount	= getSessionOptions().getSampleCount();
+    desc.SampleCount	= 1; //getSessionOptions().getSampleCount();
     desc.StaticImage	= ovrFalse;
 
     ovrResult result = ::ovr_CreateTextureSwapChainGL( mSession, &desc, &mTextureSwapChain );
@@ -138,6 +138,22 @@ void Hmd::initializeRenderTarget()
 	// Create texture
 	ci::gl::TextureRef depthAttachment = ci::gl::Texture::create( mRenderTargetSize.x, mRenderTargetSize.y, depthFmt );
 
+	// Shared Multisample depth attachment
+	if( getSessionOptions().getSampleCount() > 1 ) {
+		glGenTextures( 1, &mMultiSampleDepthTexture );
+		glBindTexture( GL_TEXTURE_2D_MULTISAMPLE, mMultiSampleDepthTexture );
+
+		glTexImage2DMultisample( GL_TEXTURE_2D_MULTISAMPLE, getSessionOptions().getSampleCount(), GL_DEPTH_COMPONENT, mRenderTargetSize.x, mRenderTargetSize.y, false );
+
+		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT );
+		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT );
+		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR );
+		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		glTexParameteri( GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAX_LEVEL, 0 );
+	
+		glBindTexture( GL_TEXTURE_2D_MULTISAMPLE, 0 );
+	}
+
 	// Create render targets corresponding to swapchain buffer count
 	for( int i = 0; i < swapChainBufferCount; ++i ) {
 		GLuint texId = 0;
@@ -159,7 +175,36 @@ void Hmd::initializeRenderTarget()
 		// Create render target
 		ci::gl::FboRef renderTarget = ci::gl::Fbo::create( mRenderTargetSize.x, mRenderTargetSize.y, fboFmt );
 		mRenderTargets.push_back( renderTarget );
+
+		// create a multisample render target and texture
+		if( getSessionOptions().getSampleCount() > 1 ) {
+			GLuint multiSampleRenderTarget;
+			glGenFramebuffers( 1, &multiSampleRenderTarget );
+			mMultiSampleRenderTargets.push_back( multiSampleRenderTarget );
+		
+			GLuint multiSampleTexture;
+			// color texture
+			glGenTextures( 1, &multiSampleTexture );
+			glBindTexture( GL_TEXTURE_2D_MULTISAMPLE, multiSampleTexture );
+			mMultiSampleTextures.push_back( multiSampleTexture );
+
+			glTexImage2DMultisample( GL_TEXTURE_2D_MULTISAMPLE, getSessionOptions().getSampleCount(), GL_RGBA, mRenderTargetSize.x, mRenderTargetSize.y, false );
+
+			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER );
+			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER );
+			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR );
+			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+			glTexParameteri( GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAX_LEVEL, 0 );  
+		
+			// Attach to multisample render target
+			glBindFramebuffer( GL_FRAMEBUFFER, multiSampleRenderTarget );
+			glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, multiSampleTexture, 0 );
+			glFramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D_MULTISAMPLE, mMultiSampleDepthTexture, 0 );
+			glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+		}
 	}
+
+	CI_CHECK_GL();
 }
 
 void Hmd::destroyRenderTarget()
@@ -170,6 +215,20 @@ void Hmd::destroyRenderTarget()
 		::ovr_DestroyTextureSwapChain( mSession, mTextureSwapChain );
 		mTextureSwapChain = nullptr;
 	}
+
+	
+	for( auto rtId : mMultiSampleRenderTargets ) {
+		if( rtId )
+			glDeleteFramebuffers( 1, &rtId );
+	}
+
+	for( auto texId : mMultiSampleTextures ) {
+		if( texId )
+			glDeleteTextures( 1, &texId );
+	}
+
+	if( mMultiSampleDepthTexture )
+		glDeleteTextures( 1, &mMultiSampleDepthTexture );
 }
 
 void Hmd::initializeMirrorTexture( const glm::ivec2& size )
@@ -302,8 +361,15 @@ void Hmd::bind()
 		// Get current swapchain index
 		::ovr_GetTextureSwapChainCurrentIndex( mSession, mTextureSwapChain, &mCurrentSwapChainIndex );
 		// Find the corresponding render target and bind it
-		auto& renderTarget = mRenderTargets[static_cast<size_t>( mCurrentSwapChainIndex )];
-		renderTarget->bindFramebuffer();
+		if( ! mMultiSampleDepthTexture ) {
+			auto& renderTarget = mRenderTargets[static_cast<size_t>( mCurrentSwapChainIndex )];
+			renderTarget->bindFramebuffer();
+		}
+		else {
+			auto& renderTarget = mMultiSampleRenderTargets[static_cast<size_t>( mCurrentSwapChainIndex )];
+			glBindFramebuffer( GL_FRAMEBUFFER, renderTarget );
+		}
+
 		// Clear it
 		ci::gl::ScopedViewport scopedViewPort( mRenderTargetSize );
 		ci::gl::clear( mClearColor );
@@ -313,9 +379,25 @@ void Hmd::bind()
 void Hmd::unbind()
 {
 	if( mTextureSwapChain && ( ! mRenderTargets.empty() ) && mIsVisible && ( -1 != mCurrentSwapChainIndex ) ) {
-		// Unbind current render target
-		auto& renderTarget = mRenderTargets[static_cast<size_t>( mCurrentSwapChainIndex )];
-		renderTarget->unbindFramebuffer();
+		if( ! mMultiSampleDepthTexture ) {
+			// Unbind current render target
+			auto& renderTarget = mRenderTargets[static_cast<size_t>( mCurrentSwapChainIndex )];
+			renderTarget->unbindFramebuffer();
+		}
+		else {
+			// Unbind current render target
+			glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+			
+			// resolve textures
+			auto& renderTarget = mRenderTargets[static_cast<size_t>( mCurrentSwapChainIndex )];
+			auto& msRenderTarget = mMultiSampleRenderTargets[static_cast<size_t>( mCurrentSwapChainIndex )];
+		
+			glBindFramebuffer( GL_READ_FRAMEBUFFER, msRenderTarget );
+			glBindFramebuffer( GL_DRAW_FRAMEBUFFER, renderTarget->getId() );
+			glBlitFramebuffer( 0, 0, mRenderTargetSize.x, mRenderTargetSize.y, 0, 0, mRenderTargetSize.x, mRenderTargetSize.y, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+			glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+		}		
+
 		// Commit swapchain
 		::ovr_CommitTextureSwapChain( mSession, mTextureSwapChain );
 	}
